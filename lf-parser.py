@@ -14,14 +14,16 @@ Usage:
     python lf-parser.py -e input.txt -o output.lf
 
 When decoding, each 16-byte record is printed as:
-    XX CommandName [param1 param2 ...]    # raw: <32 hex chars>
-
-You may remove the #raw comment from a line, edit the plaintext parameters and re-encode them to a valid .LF program.
+    XX CommandName [param1 param2 ...]    # raw: <32 hex>
 
 """
-import sys, os, struct, argparse
 
-# 1) Command‐ID → human‐readable name
+import sys, struct, argparse
+
+# COLUMN where "# raw:" comments begin
+RAW_COLUMN = 60
+
+# Command ID → human‐readable string
 CMD_ID_TO_NAME = {
     0:   "Empty",
     1:   "Line Speed",
@@ -74,46 +76,64 @@ CMD_ID_TO_NAME = {
     127: "Padding",
 }
 
+# SysMem field (offset, dtype, optional transform function)
+# dtype is one of: "int8","int16","int32","float32","str[N]" or "bitX"
+sysmem_field_map = {
+    "ProgramSize":        (207,  "int32",    lambda v: v + 1),
+    "XYMoveSpeed":        (12,   "float32"),
+    "ZMoveSpeed":         (44,   "float32"),
+    "DebugSpeed":         (105,  "float32"),
+    "TipHomeX":           (85,   "float32"),
+    "TipHomeY":           (89,   "float32"),
+    "TipHomeZ":           (93,   "float32"),
+    "TipAdjustX":         (109,  "float32"),
+    "TipAdjustY":         (113,  "float32"),
+    "TipAdjustZ":         (117,  "float32"),
+    "SoftOrgX":           (267,  "float32"),
+    "SoftOrgY":           (271,  "float32"),
+    "SoftOrgZ":           (275,  "float32"),
+    "AutoPurgeWaitTime":  (178,  "float32"),
+    "AutoPurgeDispenseTime": (182,"float32"),
+    "ZLimit":             (79,   "float32"),
+    "PreDispenseWait":    (263,  "float32"),
+    "RunCounter":         (70,   "int16"),
+    "QuickStep":          (177,  "int8",     lambda v: 1 if v else 0),
+    "RunningHomeFirst":   (397,  "int8",     lambda v: 0 if v else 1),
+    "EmergencyMode":      (190,  "int8",     lambda v: 1 if v == "Maintaining" else 0),
+    "ProgramLabel":       (52,   "str[15]"),
+    "MagicSignature_398": (398,  "int16"),
+}
+# Pack bits O1–O8 at offset 83 (2 bytes)
+for i in range(8):
+    sysmem_field_map[f"O{i+1}"] = (83, f"bit{i}")
 
-def decode_command_records(data, lines):
-    """
-    Decode the first (len(data)-400) bytes as 16-byte records.
-    Each line is formatted as:
-      XX CommandName [param1 param2 ...] <padding spaces> # raw: <32 hex chars>
 
-    All "# raw:" comments will begin at the same fixed column (RAW_COLUMN),
-    making them line up in a neat vertical block.
-    """
-    body   = data[:-400]
+def decode_command_records(data: bytes, lines: list):
+
+    body = data[:-400]
     sysmem = data[-400:]
     n_recs = len(body) // 16
 
-    # Choose which column (1‐indexed) you want "# raw:" to start at. 
-    # For example, RAW_COLUMN = 60 means that the first character of "# raw:" is at position 60.
-    RAW_COLUMN = 60
-
     lines.append(f"# {n_recs} records")
-
     offset = 0
+
     for _ in range(n_recs):
         rec = body[offset : offset + 16]
         offset += 16
 
-        # Fisnar's programs are usually padded to length. Padding line check: first 15 bytes = 0x00, last byte = 0xFF
+        # Padding check: first 15 bytes = 0x00, last byte = 0xFF
         if rec[:15] == b"\x00" * 15 and rec[15] == 0xFF:
             left_part = "FF Padding"
             raw_hex = rec.hex().upper()
-            # Compute how many spaces to add so that "# raw:" is at RAW_COLUMN
             spaces_needed = max(1, RAW_COLUMN - len(left_part) - 1)
             lines.append(left_part + (" " * spaces_needed) + f"# raw: {raw_hex}")
             continue
 
-        # Normal record: decode byte15, name, parameters
         byte15 = rec[15]
         cmd_id = byte15 & 0x7F
-        name   = CMD_ID_TO_NAME.get(cmd_id, f"UNKNOWN_{cmd_id}")
+        name = CMD_ID_TO_NAME.get(cmd_id, f"UNKNOWN_{cmd_id}")
 
-        # Unpack parameters:
+        # Unpack parameters
         params = []
         def rf(o): return struct.unpack_from("<f", rec, o)[0]
         def ri(o): return struct.unpack_from("<h", rec, o)[0]
@@ -176,7 +196,7 @@ def decode_command_records(data, lines):
             params.append(ri(10) / 1000.0)
             params.append(rf(4))
             params.append(ri(12) / 1000.0)
-            params.append(ri(8)  / 1000.0)
+            params.append(ri(8) / 1000.0)
         elif cmd_id == 37:
             params.append(rf(0))
             params.append(rf(4))
@@ -188,15 +208,14 @@ def decode_command_records(data, lines):
             params.append(rf(8))
             params.append(ri(12))
         elif cmd_id in (13, 32):
-            params.append(ri(0)  / 100.0)
-            params.append(ri(2)  / 100.0)
+            params.append(ri(0) / 100.0)
+            params.append(ri(2) / 100.0)
             params.append(ri(10))
             params.append(ri(12))
             params.append(rec[14])
             params.append(ri(8))
         # else: no parameters
 
-        # Build "left_part" (human readable data before "# raw:")
         if params:
             outp = []
             for p in params:
@@ -213,127 +232,189 @@ def decode_command_records(data, lines):
             left_part = f"{byte15:02X} {name}"
 
         raw_hex = rec.hex().upper()
-        # Compute how many spaces to add so that "# raw:" is at RAW_COLUMN
         spaces_needed = max(1, RAW_COLUMN - len(left_part) - 1)
         lines.append(left_part + (" " * spaces_needed) + f"# raw: {raw_hex}")
 
     return sysmem
 
 
-
-def decode_sysmem(sysmem, lines):
-
-    # Append sysmem headers:
-    lines.append("===== SysMem (400 bytes) as raw hex =====")
-    hex_list = [f"{b:02X}" for b in sysmem]
-    for i in range(0, 400, 20):
-        lines.append(" ".join(hex_list[i:i+20]))
-
-    lines.append("===== SysMem (decoded fields) =====")
-
+def decode_sysmem_pretty(sysmem: bytes, lines: list, raw_column=RAW_COLUMN):
+    """
+    Print each mapped SysMem field as its own entry (Field: value    # raw: <hex>).
+    Then print a final "unmapped raw" 400-byte block so encoding can preserve those bytes exactly.
+    """
     def get_int(offset, size):
-        if size == 1: return struct.unpack_from("<b", sysmem, offset)[0]
-        if size == 2: return struct.unpack_from("<h", sysmem, offset)[0]
-        if size == 4: return struct.unpack_from("<i", sysmem, offset)[0]
+        if size == 1:
+            return struct.unpack_from("<b", sysmem, offset)[0]
+        if size == 2:
+            return struct.unpack_from("<h", sysmem, offset)[0]
+        if size == 4:
+            return struct.unpack_from("<i", sysmem, offset)[0]
         raise ValueError("Unsupported int size")
 
     def get_float(offset):
         return struct.unpack_from("<f", sysmem, offset)[0]
 
     def get_string(offset, length):
-        raw = sysmem[offset:offset+length]
-        if b"\x00" in raw: raw = raw.split(b"\x00", 1)[0]
-        try: return raw.decode("ascii", errors="ignore")
-        except: return "<invalid>"
+        raw = sysmem[offset:offset + length]
+        if b"\x00" in raw:
+            raw = raw.split(b"\x00", 1)[0]
+        try:
+            return raw.decode("ascii", errors="ignore")
+        except:
+            return "<invalid>"
 
-    prog_raw = get_int(207, 4)
-    lines.append(f"ProgramSize: {prog_raw - 1}")
-    lines.append(f"XYMoveSpeed: {get_float(12)}")
-    lines.append(f"ZMoveSpeed: {get_float(44)}")
-    lines.append(f"DebugSpeed: {get_float(105)}")
-    lines.append(f"TipHomeX: {get_float(85)}")
-    lines.append(f"TipHomeY: {get_float(89)}")
-    lines.append(f"TipHomeZ: {get_float(93)}")
-    lines.append(f"TipAdjustX: {get_float(109)}")
-    lines.append(f"TipAdjustY: {get_float(113)}")
-    lines.append(f"TipAdjustZ: {get_float(117)}")
-    lines.append(f"SoftOrgX: {get_float(267)}")
-    lines.append(f"SoftOrgY: {get_float(271)}")
-    lines.append(f"SoftOrgZ: {get_float(275)}")
-    lines.append(f"AutoPurgeWaitTime: {get_float(178)}")
-    lines.append(f"AutoPurgeDispenseTime: {get_float(182)}")
-    lines.append(f"ZLimit: {get_float(79)}")
-    lines.append(f"PreDispenseWait: {get_float(263)}")
-    run_cn = get_int(70, 2); lines.append(f"RunCounter: {run_cn}")
-    quick = get_int(177, 1); lines.append(f"QuickStep: {bool(quick != 0)}")
-    rh = get_int(397, 1); lines.append(f"RunningHomeFirst: {bool(rh == 0)}")
-    emg = get_int(190, 1)
-    lines.append(f"EmergencyMode: {'Maintaining' if emg != 0 else 'Initial'}")
-    prog_label = get_string(52, 15); lines.append(f"ProgramLabel: {prog_label}")
-    oflags = get_int(83, 2)
-    for bit in range(8):
-        lines.append(f"O{bit+1}: {bool(oflags & (1 << bit))}")
-    magic398 = get_int(398, 2); lines.append(f"MagicSignature_398: {magic398}")
+    def get_raw(offset, size):
+        return sysmem[offset : offset + size].hex().upper()
 
+    # Emit header for decoded fields
+    lines.append("===== SysMem (decoded fields) =====")
 
-def encode_records_from_text(lines):
-    """
-    Read lines up to raw sysmem header
-    For each record line:
-      - If “# raw: <32hex>” is present → take those 16 bytes verbatim (no repack)
-      - Otherwise, re-encode from "<HEX15> CommandName [params]" text
-    Returns:
-      recs: bytearray of all 16-byte records in sequence
-      idx:  index in `lines` where sysmem header appears
-    """
-    recs = bytearray()
-    idx = 0
+    # Track which offsets have been covered by mapped fields
+    covered = set()
 
-    while idx < len(lines):
-        ln = lines[idx].rstrip("\n")
-        strip_ln = ln.strip()
+    for field, info in sysmem_field_map.items():
+        offset, dtype = info[0], info[1]
+        raw = ""
 
-        # Skip blank lines or comments
-        if not strip_ln or strip_ln.startswith("#"):
-            idx += 1
+        if dtype.startswith("bit"):
+            # skip bits here; we'll emit them after collecting all O1–O8
             continue
 
-        # Stop as soon as we hit the SysMem header
-        if strip_ln.startswith("===== SysMem (400 bytes) as raw hex ====="):
+        if dtype == "int8":
+            val = get_int(offset, 1)
+            raw = get_raw(offset, 1)
+            covered.update(range(offset, offset+1))
+
+        elif dtype == "int16":
+            val = get_int(offset, 2)
+            raw = get_raw(offset, 2)
+            covered.update(range(offset, offset+2))
+
+        elif dtype == "int32":
+            val = get_int(offset, 4)
+            raw = get_raw(offset, 4)
+            covered.update(range(offset, offset+4))
+
+        elif dtype == "float32":
+            val = get_float(offset)
+            raw = get_raw(offset, 4)
+            covered.update(range(offset, offset+4))
+
+        elif dtype.startswith("str["):
+            length = int(dtype[4:-1])
+            val = get_string(offset, length)
+            raw = get_raw(offset, length)
+            covered.update(range(offset, offset+length))
+
+        else:
+            # unknown dtype (should not happen (famous last words))
+            continue
+
+        # Reverse transforms
+        if len(info) > 2:
+            if field == "ProgramSize":
+                val -= 1
+            elif field == "QuickStep":
+                val = (val != 0)
+            elif field == "RunningHomeFirst":
+                val = (val == 0)
+            elif field == "EmergencyMode":
+                val = "Maintaining" if val else "Initial"
+
+        text = f"{field}: {val}"
+        pad = max(1, RAW_COLUMN - len(text) - 1)
+        lines.append(text + (" " * pad) + f"# raw: {raw}")
+
+    # Emit O1–O8 bits (packed in 2-byte int at offset 83)
+    oflags = struct.unpack_from("<H", sysmem, 83)[0]
+    covered.update([83, 84])  # those two bytes used by all O1–O8
+
+    for i in range(8):
+        bit = (oflags >> i) & 1
+        text = f"O{i+1}: {bool(bit)}"
+        pad = max(1, RAW_COLUMN - len(text) - 1)
+        lines.append(text + (" " * pad) + f"# raw: {(oflags & 0xFFFF):04X}")
+
+    # Emit a final raw block for any offsets not covered above,
+    # so that encoding can preserve them exactly.
+    lines.append("===== SysMem (unmapped raw) =====")
+    # Print 20 bytes per line, from byte 0..399
+    for i in range(0, 400, 20):
+        slab = sysmem[i : i + 20]
+        hex_vals = " ".join(f"{b:02X}" for b in slab)
+        lines.append(hex_vals)
+
+
+def encode_sysmem_from_fields(lines: list, start_idx: int):
+
+    sysmem = bytearray(400)
+    bitfields = {}
+
+    for idx in range(start_idx + 1, len(lines)):
+        line = lines[idx].strip()
+        if not line or line.startswith("====="):
             break
-
-        # If "# raw:" is present, just take those 16 bytes verbatim
-        if "# raw:" in ln:
-            # Extract 32 hex chars after "# raw:"
-            main_part, raw_part = ln.split("# raw:", 1)
-            raw_hex = raw_part.strip().replace(" ", "")
-            if len(raw_hex) != 32:
-                raise ValueError(
-                    f"Expected 32 hex chars after '# raw:', got '{raw_hex}' in line: '{ln}'"
-                )
-            rec = bytes.fromhex(raw_hex)
-            if len(rec) != 16:
-                raise ValueError(
-                    f"Raw hex did not decode to 16 bytes in line: '{ln}'"
-                )
-            recs.extend(rec)
-            idx += 1
+        if ":" not in line:
             continue
 
-        # 2) No "# raw:" → parse & re-pack from text
-        rec = _pack_record_from_text(ln, ln)
-        recs.extend(rec)
-        idx += 1
+        field, value = map(str.strip, line.split(":", 1))
 
-    return recs, idx
+        # If #raw comment is in place, skip and just copy from unmapped block
+        if "# raw:" in line:
+            continue
+
+        # Otherwise, re-encode
+        if field not in sysmem_field_map:
+            continue
+
+        offset, dtype = sysmem_field_map[field][:2]
+        transform = (
+            sysmem_field_map[field][2]
+            if len(sysmem_field_map[field]) > 2
+            else (lambda v: v)
+        )
+
+        try:
+            if dtype.startswith("bit"):
+                bit = int(dtype[3:])
+                val = value.lower() in ("1", "true", "yes")
+                bitfields.setdefault(offset, 0)
+                if val:
+                    bitfields[offset] |= (1 << bit)
+
+            elif dtype == "int8":
+                sysmem[offset] = transform(value) & 0xFF
+
+            elif dtype == "int16":
+                struct.pack_into("<h", sysmem, offset, transform(int(value)))
+
+            elif dtype == "int32":
+                struct.pack_into("<i", sysmem, offset, transform(int(value)))
+
+            elif dtype == "float32":
+                struct.pack_into("<f", sysmem, offset, float(value))
+
+            elif dtype.startswith("str["):
+                length = int(dtype[4:-1])
+                encoded = value.encode("ascii", errors="ignore")[:length]
+                sysmem[offset : offset + length] = encoded + b"\x00" * (length - len(encoded))
+
+        except Exception as e:
+            raise ValueError(f"Error encoding field '{field}': {e}")
+
+    # Write collected bitfields (O1..O8)
+    for offset, bits in bitfields.items():
+        struct.pack_into("<H", sysmem, offset, bits)
+
+    return bytes(sysmem)
 
 
-def _pack_record_from_text(text_part, original_line):
+def _pack_record_from_text(text_part: str, original_line: str) -> bytes:
     """
-    Given text_part = "<HEX15> <CommandName> [param1 param2 ...]" (no "# raw:"),
-    parse tokens and pack into 16-byte record
-
-    Returns a bytes object of length 16. Raises ValueError on parse failures.
+    Given a text line without "# raw:", of the form:
+      "<HEX15> <CommandName> [param1 param2 ...]"
+    parse tokens and pack into a 16-byte record.
     """
     tokens = text_part.split()
     if len(tokens) < 2:
@@ -349,15 +430,15 @@ def _pack_record_from_text(text_part, original_line):
     except ValueError:
         raise ValueError(f"Invalid hex '{hex15}' in line: '{original_line}'")
 
-    # If byte15 = 0xFF, the record is padding
+    # Padding line if byte15 == 0xFF
     if byte15 == 0xFF:
         return b"\x00" * 15 + b"\xFF"
 
-    # Otherwise build a 16-byte buffer with b[15] = byte15
-    b = bytearray(16)
-    b[15] = byte15
+    # Otherwise, build 16-byte buffer and fill in fields
+    bcar = bytearray(16)
+    bcar[15] = byte15
 
-    # Split tokens[1:] into command name vs numeric parameters
+    # Distinguish command name tokens vs parameter tokens
     name_tokens = []
     param_tokens = []
     seen_param = False
@@ -372,7 +453,7 @@ def _pack_record_from_text(text_part, original_line):
         else:
             param_tokens.append(tok)
 
-    # Convert param_tokens to a list of numbers
+    # Convert param_tokens into numeric list
     val_list = []
     for p in param_tokens:
         if "." in p or "e" in p or "E" in p:
@@ -389,167 +470,206 @@ def _pack_record_from_text(text_part, original_line):
     cmd_id = byte15 & 0x7F
     vi = 0  # index into val_list
 
-    # Re-encode data
-
+    # Now pack fields according to cmd_id
     if cmd_id == 54:
         p = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 12, p)
+        struct.pack_into("<h", bcar, 12, p)
 
     elif cmd_id == 1:
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
         p1 = int(val_list[vi]); vi += 1
-        b[14] = p1
+        bcar[14] = p1
 
     elif cmd_id in (9, 71):
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
 
     elif cmd_id in (27, 30, 40):
         p = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 12, p)
+        struct.pack_into("<h", bcar, 12, p)
 
     elif cmd_id in (33, 76):
         p = int(val_list[vi]); vi += 1
-        b[14] = p
+        bcar[14] = p
 
     elif cmd_id == 22:
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
         p1 = int(val_list[vi]); vi += 1
-        b[14] = p1
+        bcar[14] = p1
 
     elif cmd_id in (6, 53):
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
         f1 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 4, f1)
+        struct.pack_into("<f", bcar, 4, f1)
 
     elif cmd_id == 68:
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
         f1 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 4, f1)
+        struct.pack_into("<f", bcar, 4, f1)
         f2 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 8, f2)
+        struct.pack_into("<f", bcar, 8, f2)
 
     elif cmd_id == 36:
         p = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 12, p)
+        struct.pack_into("<h", bcar, 12, p)
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
 
     elif cmd_id == 28:
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
         f1 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 4, f1)
+        struct.pack_into("<f", bcar, 4, f1)
         p2 = int(val_list[vi]); vi += 1
-        b[14] = p2 - 1
+        bcar[14] = p2 - 1
         p3 = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 12, p3)
+        struct.pack_into("<h", bcar, 12, p3)
 
     elif cmd_id == 70:
         p = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 8, p)
+        struct.pack_into("<h", bcar, 8, p)
         p2 = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 10, p2)
+        struct.pack_into("<h", bcar, 10, p2)
 
     elif cmd_id in (7, 43):
         p = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 8, p)
+        struct.pack_into("<h", bcar, 8, p)
         p2 = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 10, p2)
+        struct.pack_into("<h", bcar, 10, p2)
         p3 = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 12, p3)
+        struct.pack_into("<h", bcar, 12, p3)
 
     elif cmd_id == 69:
         p = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 8, p)
+        struct.pack_into("<h", bcar, 8, p)
         p2 = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 10, p2)
+        struct.pack_into("<h", bcar, 10, p2)
 
     elif cmd_id == 23:
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
         f1 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 4, f1)
+        struct.pack_into("<f", bcar, 4, f1)
         f2 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 8, f2)
+        struct.pack_into("<f", bcar, 8, f2)
 
     elif cmd_id in (2, 3, 4, 5, 12, 18, 31, 55, 67, 72, 73, 74, 75):
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
         f1 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 4, f1)
+        struct.pack_into("<f", bcar, 4, f1)
         f2 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 8, f2)
+        struct.pack_into("<f", bcar, 8, f2)
 
     elif cmd_id == 66:
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
         f1 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 4, f1)
+        struct.pack_into("<f", bcar, 4, f1)
         f2 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 8, f2)
+        struct.pack_into("<f", bcar, 8, f2)
         p3 = int(round(val_list[vi] * 100)); vi += 1
-        struct.pack_into("<h", b, 12, p3)
+        struct.pack_into("<h", bcar, 12, p3)
 
     elif cmd_id == 21:
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
         p2 = int(round(val_list[vi] * 1000)); vi += 1
-        struct.pack_into("<h", b, 10, p2)
+        struct.pack_into("<h", bcar, 10, p2)
         f1 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 4, f1)
+        struct.pack_into("<f", bcar, 4, f1)
         p4 = int(round(val_list[vi] * 1000)); vi += 1
-        struct.pack_into("<h", b, 12, p4)
+        struct.pack_into("<h", bcar, 12, p4)
         p5 = int(round(val_list[vi] * 1000)); vi += 1
-        struct.pack_into("<h", b, 8, p5)
+        struct.pack_into("<h", bcar, 8, p5)
 
     elif cmd_id == 37:
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
         f1 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 4, f1)
+        struct.pack_into("<f", bcar, 4, f1)
         f2 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 8, f2)
+        struct.pack_into("<f", bcar, 8, f2)
         p4 = int(round(val_list[vi] * 100)); vi += 1
-        struct.pack_into("<h", b, 12, p4)
+        struct.pack_into("<h", bcar, 12, p4)
 
     elif cmd_id in (29, 38):
         f0 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 0, f0)
+        struct.pack_into("<f", bcar, 0, f0)
         f1 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 4, f1)
+        struct.pack_into("<f", bcar, 4, f1)
         f2 = float(val_list[vi]); vi += 1
-        struct.pack_into("<f", b, 8, f2)
+        struct.pack_into("<f", bcar, 8, f2)
         p3 = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 12, p3)
+        struct.pack_into("<h", bcar, 12, p3)
 
     elif cmd_id in (13, 32):
         p1 = int(round(val_list[vi] * 100)); vi += 1
-        struct.pack_into("<h", b, 0, p1)
+        struct.pack_into("<h", bcar, 0, p1)
         p2 = int(round(val_list[vi] * 100)); vi += 1
-        struct.pack_into("<h", b, 2, p2)
+        struct.pack_into("<h", bcar, 2, p2)
         p3 = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 10, p3)
+        struct.pack_into("<h", bcar, 10, p3)
         p4 = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 12, p4)
+        struct.pack_into("<h", bcar, 12, p4)
         p5 = int(val_list[vi]); vi += 1
-        b[14] = p5
+        bcar[14] = p5
         p6 = int(val_list[vi]); vi += 1
-        struct.pack_into("<h", b, 8, p6)
+        struct.pack_into("<h", bcar, 8, p6)
 
-    return bytes(b)
+    return bytes(bcar)
 
 
-def parse_raw_sysmem(lines, start_idx):
+def encode_records_from_text(lines: list):
+ 
+    recs = bytearray()
+    idx = 0
+
+    while idx < len(lines):
+        ln = lines[idx].rstrip("\n")
+        strip_ln = ln.strip()
+
+        # Skip blanks or comments
+        if not strip_ln or strip_ln.startswith("#"):
+            idx += 1
+            continue
+
+        # Stop at SysMem section
+        if strip_ln.startswith("===== SysMem (decoded fields)"):
+            break
+
+        # If "# raw:" is present, copy exactly 16 bytes
+        if "# raw:" in ln:
+            _, raw_part = ln.split("# raw:", 1)
+            raw_hex = raw_part.strip().replace(" ", "")
+            if len(raw_hex) != 32:
+                raise ValueError(f"Expected 32 hex chars after '# raw:', got '{raw_hex}'")
+            rec = bytes.fromhex(raw_hex)
+            if len(rec) != 16:
+                raise ValueError(f"Raw hex did not decode to 16 bytes: '{ln}'")
+            recs.extend(rec)
+        else:
+            # No raw, re-pack from text
+            rec = _pack_record_from_text(ln, ln)
+            recs.extend(rec)
+
+        idx += 1
+
+    return recs, idx
+
+
+def parse_unmapped_raw(lines: list, start_idx: int):
     """
-    Starting below sysmem header, read next 400 bytes (20 bytes per line). Return (sysmem_bytes, next_idx).
+    Starting below '===== SysMem (unmapped raw) =====', read next 400 raw bytes (20 per line).
+    Returns (bytes_of_400, next_index).
     """
     idx = start_idx + 1
     hex_bytes = []
+
     while idx < len(lines):
         ln = lines[idx].strip()
         if not ln:
@@ -566,11 +686,67 @@ def parse_raw_sysmem(lines, start_idx):
             break
 
     if len(hex_bytes) < 400:
-        raise ValueError("Could not parse 400 bytes of raw SysMem.")
+        raise ValueError("Could not parse 400 bytes of unmapped SysMem.")
     return bytes(hex_bytes[:400]), idx
 
 
-def decode_file(infile, outfile):
+def encode_file(infile: str, outfile: str):
+  
+    all_lines = open(infile, "r", encoding="utf-8").read().splitlines()
+
+    # Re‐pack all 16‐byte records
+    recs, idx = encode_records_from_text(all_lines)
+
+    # Identify which fields lost “# raw:”
+    to_reencode = set()
+    header_unmapped = "===== SysMem (unmapped raw) ====="
+    i = idx
+    while i < len(all_lines):
+        line = all_lines[i].strip()
+        if line.startswith(header_unmapped):
+            break
+        if ":" in line and "# raw:" not in line:
+            field_name = line.split(":", 1)[0].strip()
+            if field_name in sysmem_field_map:
+                to_reencode.add(field_name)
+        i += 1
+
+    # Re‐encode only those fields into zeroed 400‐byte “mapped_buffer”
+    mapped_buffer = encode_sysmem_from_fields(all_lines, idx)
+
+    # Parse the full 400 bytes of “unmapped raw”
+    try:
+        idx_unmapped = all_lines.index(header_unmapped)
+    except ValueError:
+        raise ValueError("Could not find '===== SysMem (unmapped raw) =====' in the decoded file.")
+    unmapped_base, _ = parse_unmapped_raw(all_lines, idx_unmapped)
+
+    # Overlay only those offsets whose field lost “# raw:”
+    final_sysmem = bytearray(unmapped_base)
+    for field in to_reencode:
+        offset, dtype = sysmem_field_map[field][:2]
+        if dtype.startswith("bit"):
+            final_sysmem[offset : offset + 2] = mapped_buffer[offset : offset + 2]
+        elif dtype == "int8":
+            final_sysmem[offset] = mapped_buffer[offset]
+        elif dtype == "int16":
+            final_sysmem[offset : offset + 2] = mapped_buffer[offset : offset + 2]
+        elif dtype in ("int32", "float32"):
+            final_sysmem[offset : offset + 4] = mapped_buffer[offset : offset + 4]
+        elif dtype.startswith("str["):
+            length = int(dtype[4:-1])
+            final_sysmem[offset : offset + length] = mapped_buffer[offset : offset + length]
+        # else: unknown dtype
+
+    # Write recs + the correctly overlaid 400‐byte SysMem
+    with open(outfile, "wb") as fout:
+        fout.write(recs)
+        fout.write(bytes(final_sysmem))
+
+    print(f"Encoded {infile} → {outfile}")
+
+
+def decode_file(infile: str, outfile: str):
     data = open(infile, "rb").read()
     if len(data) < 500:
         print("Error: file too small (<500 bytes).")
@@ -578,32 +754,12 @@ def decode_file(infile, outfile):
 
     lines = []
     sysmem = decode_command_records(data, lines)
-    decode_sysmem(sysmem, lines)
+    decode_sysmem_pretty(sysmem, lines)
 
     with open(outfile, "w", encoding="utf-8") as fout:
         fout.write("\n".join(lines))
 
     print(f"Decoded {infile} → {outfile}")
-
-
-def encode_file(infile, outfile):
-    all_lines = open(infile, "r", encoding="utf-8").read().splitlines()
-
-    recs, idx = encode_records_from_text(all_lines)
-
-    # Find sysmem header
-    while idx < len(all_lines) and not all_lines[idx].startswith("===== SysMem (400 bytes) as raw hex ====="):
-        idx += 1
-    if idx >= len(all_lines):
-        raise ValueError("Raw sysmem header not found in input text.")
-
-    sysmem, _ = parse_raw_sysmem(all_lines, idx)
-
-    with open(outfile, "wb") as f:
-        f.write(recs)
-        f.write(sysmem)
-
-    print(f"Encoded {infile} → {outfile}")
 
 
 def main():
@@ -619,6 +775,7 @@ def main():
         decode_file(args.input, args.output)
     else:
         encode_file(args.input, args.output)
+
 
 if __name__ == "__main__":
     main()
