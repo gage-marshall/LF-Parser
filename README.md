@@ -1,33 +1,43 @@
 # LF-Parser
 
-A clean-room Python tool for decoding and encoding Fisnar `.LF` motion-control files in editable plain-text, with byte-perfect round-trip fidelity. Users can open a `.LF` file, make adjustments to commands or parameters, and save back to a valid `.LF` without touching raw hex.
+A clean-room Python tool for decoding and encoding Everprecision/Fisnar `.LF` motion-control files (for dispensing robots, so far) in editable plain-text, with byte-perfect round-trip fidelity. Users can open a `.LF` file, make adjustments to commands or parameters, and save back to a valid `.LF` without touching raw hex.
 
 This project is released under the MIT License.
 
 **Disclaimer**
-This project is an independent reverse-engineering effort and is **not affiliated with, endorsed by, or supported by Fisnar Inc.**
+This project is an independent reverse-engineering effort and is **not affiliated with, endorsed by, or supported by Everprecision Corp. or Fisnar Inc.**
 All trademarks, product names, and company names or logos are the property of their respective owners. This tool is provided for educational and interoperability purposes under fair use.
 
-## Features
+- ## **Features**
 
-- **Byte-perfect round-trip**: Decode → edit → encode without altering any bytes unless you explicitly change a command or parameter.
+  - **Byte-perfect round-trip**: Decode → edit → encode without altering any bytes unless you explicitly change a command or parameter.
 
-- **Editable plain-text**: Each 16-byte record is presented as:
+  - **Editable plain-text**: Each 16-byte record is presented as:
 
-  `XX CommandName [param1 param2 …]    # raw: <32 hex chars>`
+    `XX CommandName [param1 param2 …]    # raw: <32 hex chars>`
 
-  allowing users to see both human-readable data and exact raw hex.
+  - **Automatic raw-hex alignment**: All `# raw:` comments start at a fixed column for neat readability.
 
-- **Automatic raw-hex alignment**: All `# raw:` comments start at a fixed column for neat readability.
+  - **Selective repacking**: If you remove a record’s `# raw:` comment, the encoder will re-pack that record from your edited parameters; otherwise it reuses the original 16 bytes verbatim.
 
-- **Selective repacking**: If you remove a record’s `# raw:` comment, the encoder will re-pack that record from your edited parameters; otherwise it reuses the original 16 bytes verbatim.
+  - **SysMem decoding/encoding**:
 
-- **SysMem decoding/encoding**: The last 400 bytes (machine parameters) are split into two sections:
+    - Named fields (like `XYMoveSpeed`, `O1`, etc.) are decoded alongside the original bytes.
+    - Raw bytes are preserved even if unmapped or unknown.
 
-  - **Decoded fields**: Named SysMem fields (like `ProgramSize`, `TipHomeX`, `O1`, etc.) are decoded and aligned with individual `# raw:` comments.
-  - **Unmapped raw block**: Any remaining (unmapped) bytes are preserved in a 400-byte raw block at the end.
+  - **CLI preview tools**:
 
-- **MIT-licensed**: Fully open-source, safe for redistribution and modification.
+    - `--dump-sysmem (-ds)`: Print only decoded SysMem fields to the terminal.
+    - `--dump-program (-dp n)`: Print the first n lines of program records to the terminal (or all if n is omitted).
+    - `--summary`: Print a quick summary including record count, key fields, and digital output flags.
+
+  - **Auto-detection of stored programs**:
+
+    - Often, programs pulled from disk rather than exported from the machine do not contain a SysMem block. Lf-parser can automatically detect these programs and skip decoding SysMem.
+    - If the final 400 bytes contain only valid nop instructions (0x00 and 0x13), the file is assumed to be a full program without SysMem.
+    - Users can override with `--no-sysmem` (`-ns`) to force skipping.
+
+  - **MIT-licensed**: Fully open-source, safe for redistribution and modification.
 
 ## Usage
 
@@ -55,7 +65,27 @@ python3 lf-parser.py -e input.txt -o output.LF
 ```
 
 - Reconstructs `.LF` with original bytes unless edits are made.
-- Preserves all bytes—including unmapped—unless `# raw:` is removed.
+- Preserves all bytes, including unmapped, unless `# raw:` is removed.
+
+### Dump SysMem fields
+
+```
+python3 lf-parser.py -ds input.LF
+```
+
+- Dumps only decoded SysMem fields to terminal
+
+### Dump first n lines of program section
+
+```
+python3 lf-parser.py -dp n input.LF
+```
+
+### Show file summary
+
+```
+python3 lf-parser.py --summary input.LF
+```
 
 ### Verifying No Changes
 

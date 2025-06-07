@@ -2,9 +2,9 @@
 """
 lf-parser.py
 
-Not affiliated with or endorsed by Fisnar Inc. Use at your own risk.
+Not affiliated with or endorsed by Everprecision Corp. or Fisnar Inc. Use at your own risk.
 
-Decode/Encode Fisnar ".LF" motion-control files with editable plaintext and byte-perfect round-trip.
+Decode/Encode Everprecision/Fisnar ".LF" motion-control files with editable plaintext and byte-perfect round-trip.
 
 Usage:
   Decode an LF → text:
@@ -18,7 +18,8 @@ When decoding, each 16-byte record is printed as:
 
 """
 
-import sys, struct, argparse
+import sys, os, struct, argparse
+from typing import List
 
 # COLUMN where "# raw:" comments begin
 RAW_COLUMN = 60
@@ -108,15 +109,29 @@ for i in range(8):
     sysmem_field_map[f"O{i+1}"] = (83, f"bit{i}")
 
 
-def decode_command_records(data: bytes, lines: list):
+def decode_command_records(
+    data: bytes,
+    lines: list,
+    include_sysmem: bool = True
+) -> bytes:
+    """
+    Decode the first part of `data` in 16-byte records, appending human-readable
+    lines (with inline “# raw:” hex) to `lines`. If include_sysmem is True
+    and `data` is at least 400 bytes long, the last 400 bytes are treated
+    as SysMem and returned; otherwise returns b''.
+    """
+    # Split off SysMem if requested
+    if include_sysmem and len(data) >= 400:
+        body   = data[:-400]
+        sysmem = data[-400:]
+    else:
+        body   = data
+        sysmem = b""
 
-    body = data[:-400]
-    sysmem = data[-400:]
     n_recs = len(body) // 16
-
     lines.append(f"# {n_recs} records")
-    offset = 0
 
+    offset = 0
     for _ in range(n_recs):
         rec = body[offset : offset + 16]
         offset += 16
@@ -236,6 +251,7 @@ def decode_command_records(data: bytes, lines: list):
         lines.append(left_part + (" " * spaces_needed) + f"# raw: {raw_hex}")
 
     return sysmem
+
 
 
 def decode_sysmem_pretty(sysmem: bytes, lines: list, raw_column=RAW_COLUMN):
@@ -746,15 +762,42 @@ def encode_file(infile: str, outfile: str):
     print(f"Encoded {infile} → {outfile}")
 
 
-def decode_file(infile: str, outfile: str):
+def decode_file(
+    infile: str,
+    outfile: str,
+    include_sysmem: bool = True
+):
+    """
+    Decode a .LF-style file:
+     - If <500 B and length%16==0, treat entire file as commands.
+     - If >=500 B, tentatively split off last 400 B as SysMem.
+     - But if that 400 B contains only 0x00 or 0x13, fold it back into commands.
+    """
     data = open(infile, "rb").read()
-    if len(data) < 500:
-        print("Error: file too small (<500 bytes).")
+
+    # pure-record file?
+    if len(data) < 500 and len(data) % 16 == 0:
+        include_sysmem = False
+
+    # if big enough, peek at the tail for fake-SysMem
+    if include_sysmem and len(data) >= 400:
+        tail = data[-400:]
+        # if ALL bytes in that tail are 0x00 or 0x13, it's just extra commands
+        if all(b in (0x00, 0x13) for b in tail):
+            include_sysmem = False
+
+    # sanity check
+    if include_sysmem and len(data) < 500:
+        print("Error: file too small for real SysMem decoding (<500 bytes).")
         sys.exit(1)
 
     lines = []
-    sysmem = decode_command_records(data, lines)
-    decode_sysmem_pretty(sysmem, lines)
+    # Pass the (possibly updated) flag in
+    sysmem = decode_command_records(data, lines, include_sysmem=include_sysmem)
+
+    # Only dump a real SysMem if we actually split it off
+    if include_sysmem and sysmem:
+        decode_sysmem_pretty(sysmem, lines)
 
     with open(outfile, "w", encoding="utf-8") as fout:
         fout.write("\n".join(lines))
@@ -762,20 +805,200 @@ def decode_file(infile: str, outfile: str):
     print(f"Decoded {infile} → {outfile}")
 
 
+def dump_sysmem_to_terminal(infile: str):
+    """
+    Read the last 400 bytes of infile, decode the named SysMem fields,
+    and print them to stdout.
+    """
+    data = open(infile, "rb").read()
+    if len(data) < 400:
+        print(f"Error: file too small to contain a 400-byte SysMem block: {infile}")
+        sys.exit(1)
+
+    sysmem = data[-400:]
+    lines = []
+    decode_sysmem_pretty(sysmem, lines)   # existing pretty-printer
+
+    # Print each decoded line
+    for line in lines:
+        print(line)
+
+
+def dump_program_to_terminal(infile: str, n_lines: int = None):
+    """
+    Read infile, decode only the 16-byte command records (no SysMem),
+    and print the first `n_lines` of them (including the header).
+    If n_lines is None, print the entire program section.
+    """
+    data = open(infile, "rb").read()
+    lines = []
+    # Decode commands only (no SysMem)
+    decode_command_records(data, lines, include_sysmem=False)
+
+    # Determine how many lines to print
+    if n_lines is None or n_lines >= len(lines):
+        to_print = lines
+    else:
+        to_print = lines[: n_lines + 1 ]  # +1 to include the "# n records" header
+
+    for line in to_print:
+        print(line)
+
+
+def summarize_file(infile: str):
+    """
+    Print a one-line summary of an .LF or pure-record file:
+      • count of non-empty commands
+      • whether a real 400-byte SysMem block was detected
+      • ProgramSize, XYMoveSpeed, ZMoveSpeed, O1–O8 (if SysMem)
+    """
+    data = open(infile, "rb").read()
+
+    include_sysmem = True
+    size = len(data)
+
+    if size < 500 and size % 16 == 0:
+        include_sysmem = False
+    elif size >= 400:
+        tail = data[-400:]
+        if all(b in (0x00, 0x13) for b in tail):
+            include_sysmem = False
+
+    has_sysmem = include_sysmem and size >= 400
+
+    # count only “real” commands (exclude 0, 19, 127)
+    body = data[:-400] if has_sysmem else data
+    total_recs = len(body) // 16
+    valid_recs = 0
+    for i in range(total_recs):
+        rec = body[i*16:(i+1)*16]
+        cmd_id = rec[15] & 0x7F
+        if cmd_id not in (0, 19, 127):
+            valid_recs += 1
+
+    parts = [f"Commands={valid_recs}", f"SysMem={'yes' if has_sysmem else 'no'}"]
+
+    # if we really have SysMem, extract key fields
+    if has_sysmem:
+        sysmem = data[-400:]
+
+        # Helpers to read ints/floats
+        def read_int(offset, dtype):
+            if dtype == "int8":
+                return struct.unpack_from("<b", sysmem, offset)[0]
+            if dtype == "int16":
+                return struct.unpack_from("<h", sysmem, offset)[0]
+            if dtype == "int32":
+                return struct.unpack_from("<i", sysmem, offset)[0]
+            raise ValueError(f"Unsupported int dtype {dtype}")
+
+        def read_float(offset):
+            return struct.unpack_from("<f", sysmem, offset)[0]
+
+        # ProgramSize: raw = int32, stored as +1
+        offset, dtype = sysmem_field_map["ProgramSize"][:2]
+        prog_raw = read_int(offset, dtype)
+        prog_size = prog_raw - 1
+
+        # XY/Z speeds: float32
+        xy_offset = sysmem_field_map["XYMoveSpeed"][0]
+        z_offset  = sysmem_field_map["ZMoveSpeed"][0]
+        xy_speed = read_float(xy_offset)
+        z_speed  = read_float(z_offset)
+
+        parts.extend([
+            f"ProgramSize={prog_size}",
+            f"XYMoveSpeed={xy_speed:.6g}",
+            f"ZMoveSpeed={z_speed:.6g}"
+        ])
+
+        # Flags O1–O8 at offset 83 as uint16 bitfield
+        oflags = struct.unpack_from("<H", sysmem, 83)[0]
+        flags = ",".join(
+            f"O{i+1}={'1' if (oflags >> i) & 1 else '0'}"
+            for i in range(8)
+        )
+        parts.append(f"Flags=[{flags}]")
+
+    print("  ".join(parts))
+
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Decode/Encode Fisnar LF motion-control files")
+    parser = argparse.ArgumentParser(
+        description="Decode/Encode Everprecision/Fisnar LF motion-control files"
+    )
+
+    # Make -d, -e, --dump-sysmem, -dp, and --summary mutually exclusive; one is required
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("-d", "--decode", action="store_true", help="Decode .LF to text")
-    group.add_argument("-e", "--encode", action="store_true", help="Encode text to .LF")
-    parser.add_argument("input", help="Input filename")
-    parser.add_argument("-o", "--output", required=True, help="Output filename")
+    group.add_argument(
+        "-d", "--decode", action="store_true",
+        help="Decode .LF to text (auto-detect stored-program files)"
+    )
+    group.add_argument(
+        "-e", "--encode", action="store_true",
+        help="Encode text to .LF"
+    )
+    group.add_argument(
+        "-ds", "--dump-sysmem", action="store_true",
+        help="Dump SysMem section"
+    )
+    group.add_argument(
+        "-dp", "--dump-program", nargs="?", const=-1, type=int, metavar="n",
+        help="Dump first n lines of program section (no SysMem); omit n to dump all"
+    )
+    group.add_argument(
+        "--summary", action="store_true",
+        help="Print a one-line summary of the file and exit"
+    )
+
+    parser.add_argument(
+        "-ns", "--no-sysmem", action="store_true",
+        help="Force skipping the final 400-byte SysMem section when decoding"
+    )
+    parser.add_argument("input", metavar="INPUT", help="Input filename")
+    parser.add_argument(
+        "-o", "--output", metavar="OUTPUT",
+        help="Output filename (required for decode/encode)"
+    )
+
     args = parser.parse_args()
 
+    # Summary mode
+    if args.summary:
+        summarize_file(args.input)
+        return
+
+    # Dump SysMem
+    if args.dump_sysmem:
+        dump_sysmem_to_terminal(args.input)
+        return
+
+    # Dump Program lines
+    if args.dump_program is not None:
+        n = None if args.dump_program < 0 else args.dump_program
+        dump_program_to_terminal(args.input, n)
+        return
+
+    # For decode/encode, enforce -o/--output
+    if (args.decode or args.encode) and not args.output:
+        parser.error("the following argument is required for decode/encode: -o/--output")
+
     if args.decode:
-        decode_file(args.input, args.output)
-    else:
-        encode_file(args.input, args.output)
+        decode_file(
+            args.input,
+            args.output,
+            include_sysmem=not args.no_sysmem
+        )
+    else:  # args.encode
+        encode_file(
+            args.input,
+            args.output
+        )
 
 
 if __name__ == "__main__":
     main()
+
+
+
