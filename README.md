@@ -2,42 +2,38 @@
 
 A clean-room Python tool for decoding and encoding Everprecision/Fisnar `.LF` motion-control files (for dispensing robots, so far) in editable plain-text, with byte-perfect round-trip fidelity. Users can open a `.LF` file, make adjustments to commands or parameters, and save back to a valid `.LF` without touching raw hex.
 
-This project is released under the MIT License.
-
 **Disclaimer**
 This project is an independent reverse-engineering effort and is **not affiliated with, endorsed by, or supported by Everprecision Corp. or Fisnar Inc.**
 All trademarks, product names, and company names or logos are the property of their respective owners. This tool is provided for educational and interoperability purposes under fair use.
 
-- ## **Features**
+## Features
 
-  - **Byte-perfect round-trip**: Decode → edit → encode without altering any bytes unless you explicitly change a command or parameter.
+- **Byte-perfect round-trip**: Decode → edit → encode without altering any bytes unless you explicitly change a command or parameter.
 
-  - **Editable plain-text**: Each 16-byte record is presented as:
+- **Editable plain-text**: Each 16-byte record is presented as:
 
-    `XX CommandName [param1 param2 …]    # raw: <32 hex chars>`
+  `XX CommandName [param1 param2 …]    # raw: <32 hex chars>`
 
-  - **Automatic raw-hex alignment**: All `# raw:` comments start at a fixed column for neat readability.
+- **Automatic raw-hex alignment**: All `# raw:` comments start at a fixed column for neat readability.
 
-  - **Selective repacking**: If you remove a record’s `# raw:` comment, the encoder will re-pack that record from your edited parameters; otherwise it reuses the original 16 bytes verbatim.
+- **Selective repacking**: If you remove a record’s `# raw:` comment, the encoder will re-pack that record from your edited parameters; otherwise it reuses the original 16 bytes verbatim.
 
-  - **SysMem decoding/encoding**:
+- **SysMem decoding/encoding**:
 
-    - Named fields (like `XYMoveSpeed`, `O1`, etc.) are decoded alongside the original bytes.
-    - Raw bytes are preserved even if unmapped or unknown.
+  - Named fields (like `XYMoveSpeed`, `O1`, etc.) are decoded alongside the original bytes.
+  - Raw bytes are preserved even if unmapped or unknown.
 
-  - **CLI preview tools**:
+- **CLI preview tools**:
 
-    - `--dump-sysmem (-ds)`: Print only decoded SysMem fields to the terminal.
-    - `--dump-program (-dp n)`: Print the first n lines of program records to the terminal (or all if n is omitted).
-    - `--summary`: Print a quick summary including record count, key fields, and digital output flags.
+  - `--dump-sysmem (-ds)`: Print only decoded SysMem fields to the terminal.
+  - `--dump-program (-dp n)`: Print the first n lines of program records to the terminal (or all if n is omitted).
+  - `--summary`: Print a quick summary including record count, key fields, and digital output flags.
 
-  - **Auto-detection of stored programs**:
+- **Auto-detection of stored programs**:
 
-    - Often, programs pulled from disk rather than exported from the machine do not contain a SysMem block. Lf-parser can automatically detect these programs and skip decoding SysMem.
-    - If the final 400 bytes contain only valid nop instructions (0x00 and 0x13), the file is assumed to be a full program without SysMem.
-    - Users can override with `--no-sysmem` (`-ns`) to force skipping.
-
-  - **MIT-licensed**: Fully open-source, safe for redistribution and modification.
+  - Often, programs pulled from disk rather than exported from the machine do not contain a SysMem block. LF-Parser can automatically detect these programs and skip decoding SysMem.
+  - If the final 400 bytes contain only valid nop instructions (0x00 and 0x13), the file is assumed to be a full program without SysMem.
+  - Users can override with `--no-sysmem` (`-ns`) to force skipping.
 
 ## Usage
 
@@ -181,32 +177,4 @@ If no edits were made or `# raw:` was left intact, hashes will match.
 
 ## License
 
-MIT License
-
-```
-MIT License
-
-Copyright 2025 Gage Marshall
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the “Software”), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-## Acknowledgements
-
-Thanks to all contributors and testers who ensured that field-level editing, `# raw:` preservation, and byte-perfect encoding behave consistently and predictably.
+MIT. See [LICENSE.md](LICENSE.md).
